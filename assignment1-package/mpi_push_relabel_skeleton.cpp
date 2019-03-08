@@ -71,9 +71,11 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
         }
         int local_first = active_nodes_size * my_rank / p_used;
         int local_last = active_nodes_size * (my_rank + 1) / p_used;
+        int local_size = local_last - local_first;
         vector<int> local_active_nodes;
         if (local_first < active_nodes_size) {
-            local_active_nodes.assign(active_nodes.begin() + local_first, active_nodes.begin() + local_last);
+            local_active_nodes.resize(local_size);
+            memcpy(&local_active_nodes[0], &active_nodes[local_first], local_size * sizeof(int));
         }
 
         // Stage 1: push.
@@ -147,22 +149,15 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
         free(local_stash_dist);
 
         // Stage 3: update dist.
-        if (my_rank == 0) {
-            swap(dist, stash_dist);
-        }
-        MPI_Bcast(dist, N, MPI_INT, 0, comm);
+        swap(dist, stash_dist);
 
         // Stage 4: apply excess-flow changes for destination vertices.
-        if (my_rank == 0) {
-            for (auto v = 0; v < N; v++) {
-                if (stash_excess[v] != 0) {
-                    excess[v] += stash_excess[v];
-                    stash_excess[v] = 0;
-                }
+        for (auto v = 0; v < N; v++) {
+            if (stash_excess[v] != 0) {
+                excess[v] += stash_excess[v];
+                stash_excess[v] = 0;
             }
         }
-        MPI_Bcast(excess, N, MPI_INT64_T, 0, comm);
-        MPI_Bcast(stash_excess, N, MPI_INT64_T, 0, comm);
 
         // Construct active nodes.
         active_nodes.clear();
