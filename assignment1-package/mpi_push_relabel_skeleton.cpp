@@ -78,71 +78,92 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
             local_active_nodes.resize(local_size);
             memcpy(&local_active_nodes[0], &active_nodes[local_first], local_size * sizeof(int));
         }
+        cout << my_rank << ": ";
+        for (int e: local_active_nodes) {
+            cout << e << ", ";
+        }
+        cout << endl;
 
         // Stage 1: push.
         auto *local_excess_change = (int64_t *) calloc(N, sizeof(int64_t));
-        int *local_stash_send = (int *) calloc(N * N, sizeof(int));
-        int *local_stash_send_N = (int *) calloc(local_size * N, sizeof(int));
-        int *stash_send_N = NULL;
-        int i = 0;
+        // int *local_stash_send = (int *) calloc(N * N, sizeof(int));
+        int *local_stash_send_N = NULL;
+        int local_stash_send_N_size = 0;
+        // local_stash_send_N = (int *) calloc(local_size * N, sizeof(int));
+        if (!local_active_nodes.empty()) {
+            local_stash_send_N_size = local_active_nodes.back() - local_active_nodes.front() + 1;
+            local_stash_send_N = (int *) calloc(local_stash_send_N_size * N, sizeof(int));
+        }
+        // int *stash_send_N = (int *) calloc(N * N, sizeof(int));
         for (auto u : local_active_nodes) {
+            int i = u - local_active_nodes.front();
             for (auto v = 0; v < N; v++) {
                 auto residual_cap = local_cap[utils::idx(u, v, N)] -
                                     local_flow[utils::idx(u, v, N)];
                 if (residual_cap > 0 && dist[u] > dist[v] && excess[u] + local_excess_change[u] > 0) {
                     local_stash_send_N[utils::idx(i, v, N)] = std::min<int64_t>(excess[u] + local_excess_change[u], residual_cap);
-                    local_stash_send[utils::idx(u, v, N)] = std::min<int64_t>(excess[u] + local_excess_change[u], residual_cap);
+                    // local_stash_send[utils::idx(u, v, N)] = std::min<int64_t>(excess[u] + local_excess_change[u], residual_cap);
                     // local_excess_change[u] -= local_stash_send[utils::idx(u, v, N)];
                     local_excess_change[u] -= local_stash_send_N[utils::idx(i, v, N)];
                 }
             }
-            i++;
         }
         int *sizes = NULL;
         int *displs = NULL;
+        int local_displs = 0;
+        if (!local_active_nodes.empty())
+            local_displs = local_active_nodes.front() * N;
         if (my_rank == 0) {
             sizes = (int *) malloc(p * sizeof(int));
-            MPI_Gather(&local_size, 1, MPI_INT, sizes, 1, MPI_INT, 0, comm);
+            MPI_Gather(&local_stash_send_N_size, 1, MPI_INT, sizes, 1, MPI_INT, 0, comm);
             for (int i = 0; i < p; i++) {
                 sizes[i] *= N;
             }
             // for (int i = 0; i < p; i++) {
+            //     cout << "Sizes: ";
             //     cout << sizes[i] << ", ";
             // }
             // cout << endl;
             int total_size = sizes[0];
-            displs = (int *) calloc(p, sizeof(int));
-            for (int i=1; i<p; i++) {
+            displs = (int *) malloc(p * sizeof(int));
+            MPI_Gather(&local_displs, 1, MPI_INT, displs, 1, MPI_INT, 0, comm);
+            for (int i=1; i < p; i++) {
                 displs[i] = displs[i-1] + sizes[i-1];
                 total_size += sizes[i];
             }
-            stash_send_N = (int *) calloc(total_size * N, sizeof(int));
+            // stash_send_N = (int *) calloc(total_size * N, sizeof(int));
             // for (int i = 0; i < p; i++) {
+            //     cout << "Displs: ";
             //     cout << displs[i] << ", ";
             // }
             // cout << endl;
-            MPI_Gatherv(local_stash_send_N, local_size * N, MPI_INT, stash_send_N, sizes, displs, MPI_INT, 0, comm);
-            for (int i = 0; i < p; i++) {
-                for (int j = 0; j < sizes[i]; j++)
-                    cout << stash_send_N[utils::idx(i, j, sizes[i])] << ", ";
-                cout << endl;
-            }
+            MPI_Allgatherv(local_stash_send_N, local_stash_send_N_size * N, MPI_INT, stash_send, sizes, displs, MPI_INT, comm);
+            // for (int i = 0; i < p; i++) {
+            //     for (int j = 0; j < sizes[i]; j++)
+            //         cout << stash_send_N[utils::idx(i, j, sizes[i])] << ", ";
+            //     cout << endl;
+            // }
             free(sizes);
-            free(stash_send_N);
+            // free(stash_send_N);
         } else {
-            MPI_Gather(&local_size, 1, MPI_INT, sizes, 1, MPI_INT, 0, comm);
-            MPI_Gatherv(local_stash_send_N, local_size * N, MPI_INT, stash_send_N, sizes, displs, MPI_INT, 0, comm);
+            MPI_Gather(&local_stash_send_N_size, 1, MPI_INT, sizes, 1, MPI_INT, 0, comm);
+            MPI_Gather(&local_displs, 1, MPI_INT, displs, 1, MPI_INT, 0, comm);
+            MPI_Allgatherv(local_stash_send_N, local_stash_send_N_size * N, MPI_INT, stash_send, sizes, displs, MPI_INT, comm);
         }
         if (my_rank == 0) {
             for (int i = 0; i < N; i++)
                 local_excess_change[i] += excess[i];
         }
         free(local_stash_send_N);
+        // for (int i = 0; i < N * N; i++) {
+        //     cout << stash_send[i] << ", ";
+        // }
+        // cout << endl;
 
         MPI_Allreduce(local_excess_change, excess, N, MPI_INT64_T, MPI_SUM, comm);
         free(local_excess_change);
-        MPI_Allreduce(local_stash_send, stash_send, N * N, MPI_INT, MPI_SUM, comm);
-        free(local_stash_send);
+        // MPI_Allreduce(local_stash_send, stash_send, N * N, MPI_INT, MPI_SUM, comm);
+        // free(local_stash_send);
         // if (my_rank == 0) {
         //     cout << "excess:";
         //     for ( int i = 0; i < N; i++)
