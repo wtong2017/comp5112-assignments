@@ -80,14 +80,13 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
 
         // Stage 1: push.
         auto *local_excess_change = (int64_t *) calloc(N, sizeof(int64_t));
-        int *local_stash_send = (int *) calloc(N * N, sizeof(int));
         for (auto u : local_active_nodes) {
             for (auto v = 0; v < N; v++) {
                 auto residual_cap = local_cap[utils::idx(u, v, N)] -
                                     local_flow[utils::idx(u, v, N)];
                 if (residual_cap > 0 && dist[u] > dist[v] && excess[u] + local_excess_change[u] > 0) {
-                    local_stash_send[utils::idx(u, v, N)] = std::min<int64_t>(excess[u] + local_excess_change[u], residual_cap);
-                    local_excess_change[u] -= local_stash_send[utils::idx(u, v, N)];
+                    stash_send[utils::idx(u, v, N)] = std::min<int64_t>(excess[u] + local_excess_change[u], residual_cap);
+                    local_excess_change[u] -= stash_send[utils::idx(u, v, N)];
                 }
             }
         }
@@ -96,8 +95,6 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
                 local_excess_change[i] += excess[i];
         }
         MPI_Allreduce(local_excess_change, excess, N, MPI_INT64_T, MPI_SUM, comm);
-        MPI_Allreduce(local_stash_send, stash_send, N * N, MPI_INT, MPI_SUM, comm);
-        free(local_stash_send);
         free(local_excess_change);
         
         int *local_flow_change = (int *) calloc(N * N, sizeof(int));
