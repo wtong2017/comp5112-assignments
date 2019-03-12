@@ -165,6 +165,7 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
             //     cout << endl;
             // }
             free(sizes);
+            free(displs);
             // free(stash_send_N);
         // } else {
         //     MPI_Gather(&local_stash_send_N_size, 1, MPI_INT, sizes, 1, MPI_INT, 0, comm);
