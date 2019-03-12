@@ -83,6 +83,11 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
     }
     int count = 0; // DEBUG
 
+    // Variables for bcast
+    int _local_N_size;
+    int _local_first;
+    int _local_last;
+
     // Four-Stage Pulses.
     while (!active_nodes.empty()) {
         // if (count == 5)
@@ -213,8 +218,6 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
 
         // Stage 2: relabel (update dist to stash_dist).
         // auto start_clock = high_resolution_clock::now();
-        int *local_stash_dist = (int *) calloc(N, sizeof(int));
-        int *local_stash_dict_change = (int *) malloc(N * sizeof(int));
         memcpy(stash_dist, dist, N * sizeof(int));
         for (auto u : local_active_nodes) {
             if (excess[u] > 0) {
@@ -223,22 +226,17 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
                     auto residual_cap = local_cap[utils::idx(u, v, N)] - local_flow[utils::idx(u, v, N)];
                     if (residual_cap > 0) {
                         min_dist = min(min_dist, dist[v]);
-                        local_stash_dist[u] = min_dist + 1;
+                        stash_dist[u] = min_dist + 1;
                     }
                 }
             }
         }
-        MPI_Reduce(local_stash_dist, local_stash_dict_change, N, MPI_INT, MPI_SUM, 0, comm);
-        if (my_rank == 0) {
-            for (int i = 0; i < N; i++) {
-                if (local_stash_dict_change[i] > 0) {
-                    stash_dist[i] = local_stash_dict_change[i];
-                }
-            }
+        for (int i = 0; i < p_used; i++) {
+            _local_first = active_nodes_size * i / p_used;
+            _local_last = active_nodes_size * (i + 1) / p_used - 1;
+            _local_N_size = active_nodes[_local_last] - active_nodes[_local_first] + 1;
+            MPI_Bcast(&stash_dist[active_nodes[_local_first]], _local_N_size, MPI_INT, i, comm);
         }
-        MPI_Bcast(stash_dist, N, MPI_INT, 0, comm);
-        free(local_stash_dict_change);
-        free(local_stash_dist);
         // MPI_Barrier(comm);
         // auto end_clock = high_resolution_clock::now();
         // if (my_rank == 0)
