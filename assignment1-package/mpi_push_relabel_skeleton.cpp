@@ -7,13 +7,16 @@
 #include <cstring>
 #include <cstdint>
 #include <cstdlib>
+#include <cmath>
 
 #include <vector>
 #include <iostream>
+#include <chrono>
 
 #include "mpi_push_relabel.h"
 
 using namespace std;
+using namespace std::chrono;
 
 /*
  *  You can add helper functions and variables as you wish.
@@ -25,6 +28,23 @@ void pre_flow(int *dist, int64_t *excess, int *cap, int *flow, int N, int src) {
         flow[utils::idx(v, src, N)] = -flow[utils::idx(src, v, N)];
         excess[v] = flow[utils::idx(src, v, N)];
     }
+}
+
+void print_2d(int *mat, int N) {
+    cout << "------ Matrix -----" << endl;
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < N; j++) {
+            cout << mat[utils::idx(i, j, N)] << ", ";
+        }
+        cout << endl;
+    }
+    cout << "-------------------" << endl;
+}
+
+void print_1d(int64_t *array, int N) {
+    for (int i = 0; i < N; i++)
+        cout << array[i] << ", ";
+    cout << endl;
 }
 
 int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, int *cap, int *flow) {
@@ -47,12 +67,13 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
     int *dist = (int *) calloc(N, sizeof(int));
     int *stash_dist = (int *) calloc(N, sizeof(int));
     auto *excess = (int64_t *) calloc(N, sizeof(int64_t));
-    auto *stash_excess = (int64_t *) malloc(N * sizeof(int64_t));
+    auto *stash_excess = (int64_t *) calloc(N, sizeof(int64_t));
 
     // PreFlow.
     pre_flow(dist, excess, local_cap, local_flow, N, src);
 
     vector<int> active_nodes;
+    vector<int> local_active_nodes;
     int *stash_send = (int *) calloc(N * N, sizeof(int));
 
     for (auto u = 0; u < N; u++) {
@@ -60,9 +81,17 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
             active_nodes.emplace_back(u);
         }
     }
+    int count = 0; // DEBUG
+
+    // Variables for bcast
+    int _local_N_size;
+    int _local_first;
+    int _local_last;
 
     // Four-Stage Pulses.
     while (!active_nodes.empty()) {
+        // if (count == 5)
+        //     break;
         // Create local active nodes
         int active_nodes_size = active_nodes.size();
         int p_used = active_nodes_size;
@@ -71,55 +100,91 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
         }
         int local_first = active_nodes_size * my_rank / p_used;
         int local_last = active_nodes_size * (my_rank + 1) / p_used;
-        int local_size = local_last - local_first;
-        vector<int> local_active_nodes;
+        int local_size = 0;
         if (local_first < active_nodes_size) {
+            local_size = local_last - local_first;
             local_active_nodes.resize(local_size);
             memcpy(&local_active_nodes[0], &active_nodes[local_first], local_size * sizeof(int));
         }
+        // cout << my_rank << ": ";
+        // for (int e: local_active_nodes) {
+        //     cout << e << ", ";
+        // }
+        // cout << endl;
 
         // Stage 1: push.
-        auto *local_excess_change = (int64_t *) calloc(N, sizeof(int64_t));
+        // auto start_clock = high_resolution_clock::now();
+        // if (my_rank == 0) {
+        //     cout << "old" << endl;
+        //     print_1d(excess, N);
+        //     cout << "--------------" << endl;
+        // }
         for (auto u : local_active_nodes) {
             for (auto v = 0; v < N; v++) {
                 auto residual_cap = local_cap[utils::idx(u, v, N)] -
                                     local_flow[utils::idx(u, v, N)];
-                if (residual_cap > 0 && dist[u] > dist[v] && excess[u] + local_excess_change[u] > 0) {
-                    stash_send[utils::idx(u, v, N)] = std::min<int64_t>(excess[u] + local_excess_change[u], residual_cap);
-                    local_excess_change[u] -= stash_send[utils::idx(u, v, N)];
+                if (residual_cap > 0 && dist[u] > dist[v] && excess[u] > 0) {
+                    stash_send[utils::idx(u, v, N)] = std::min<int64_t>(excess[u], residual_cap);
+                    excess[u] -= stash_send[utils::idx(u, v, N)];
                 }
             }
         }
-        if (my_rank == 0) {
-            for (int i = 0; i < N; i++)
-                local_excess_change[i] += excess[i];
+        // for (int i = 0; i < local_N_size; i++)
+        //     cout << local_excess[i] << ", ";
+        // cout << endl;
+        // if (my_rank == 0) {
+        //     print_1d(excess, N);
+        // }
+        for (int i = 0; i < p_used; i++) {
+            _local_first = active_nodes_size * i / p_used;
+            _local_last = active_nodes_size * (i + 1) / p_used - 1;
+            _local_N_size = active_nodes[_local_last] - active_nodes[_local_first] + 1;
+            MPI_Bcast(&excess[active_nodes[_local_first]], _local_N_size, MPI_INT64_T, i, comm);
+            MPI_Bcast(&stash_send[utils::idx(active_nodes[_local_first], 0, N)], _local_N_size * N, MPI_INT, i, comm);
         }
-        MPI_Allreduce(local_excess_change, excess, N, MPI_INT64_T, MPI_SUM, comm);
-        free(local_excess_change);
-        
-        int *local_flow_change = (int *) calloc(N * N, sizeof(int));
-        auto *local_stash_excess = (int64_t *) calloc(N, sizeof(int64_t));
-        if (my_rank == 0) {
-            memcpy(local_flow_change, local_flow, N * N * sizeof(int));
-        }
-        for (auto u : local_active_nodes) {
+
+        // if (my_rank == 0) {
+        //     print_2d(stash_send, N);
+        // }
+
+        // if (my_rank == 0) {
+        //     cout << "excess:";
+        //     for ( int i = 0; i < N; i++)
+        //         cout << *(excess + i) << ", ";
+        //     cout << endl;
+        //     cout << "stash send:";
+        //     for ( int i = 0; i < N * N; i++)
+        //         cout << *(stash_send + i) << ", ";
+        //     cout << endl;
+        // }
+        // MPI_Barrier(comm);
+        // auto end_clock = high_resolution_clock::now();
+        // if (my_rank == 0)
+        //     fprintf(stderr, "Elapsed Time: %.9lf s\n", duration_cast<nanoseconds>(end_clock - start_clock).count() / pow(10, 9));
+        // auto start_clock = high_resolution_clock::now();
+        for (auto u : active_nodes) {
             for (auto v = 0; v < N; v++) {
                 if (stash_send[utils::idx(u, v, N)] > 0) {
-                    local_flow_change[utils::idx(u, v, N)] += stash_send[utils::idx(u, v, N)];
-                    local_flow_change[utils::idx(v, u, N)] -= stash_send[utils::idx(u, v, N)];
-                    local_stash_excess[v] += stash_send[utils::idx(u, v, N)];
+                    local_flow[utils::idx(u, v, N)] += stash_send[utils::idx(u, v, N)];
+                    local_flow[utils::idx(v, u, N)] -= stash_send[utils::idx(u, v, N)];
+                    stash_excess[v] += stash_send[utils::idx(u, v, N)];
                     stash_send[utils::idx(u, v, N)] = 0;
                 }
             }
         }
-        MPI_Allreduce(local_flow_change, local_flow, N * N, MPI_INT, MPI_SUM, comm);
-        free(local_flow_change);
-        MPI_Allreduce(local_stash_excess, stash_excess, N, MPI_INT64_T, MPI_SUM, comm);
-        free(local_stash_excess);
+        // MPI_Barrier(comm);
+        // auto end_clock = high_resolution_clock::now();
+        // if (my_rank == 0)
+        //     fprintf(stderr, "Elapsed Time: %.9lf s\n", duration_cast<nanoseconds>(end_clock - start_clock).count() / pow(10, 9));
+        // if (my_rank == 0) {
+        //     cout << "flow: ";
+        //     for ( int i = 0; i < N*N; i++)
+        //         cout << *(local_flow + i) << ", ";
+        //     cout << endl;
+        // }
 
         // Stage 2: relabel (update dist to stash_dist).
-        int *local_stash_dist = (int *) calloc(N, sizeof(int));
-        int *local_stash_dict_change = (int *) malloc(N * sizeof(int));
+        // auto start_clock = high_resolution_clock::now();
         memcpy(stash_dist, dist, N * sizeof(int));
         for (auto u : local_active_nodes) {
             if (excess[u] > 0) {
@@ -128,22 +193,21 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
                     auto residual_cap = local_cap[utils::idx(u, v, N)] - local_flow[utils::idx(u, v, N)];
                     if (residual_cap > 0) {
                         min_dist = min(min_dist, dist[v]);
-                        local_stash_dist[u] = min_dist + 1;
+                        stash_dist[u] = min_dist + 1;
                     }
                 }
             }
         }
-        MPI_Reduce(local_stash_dist, local_stash_dict_change, N, MPI_INT, MPI_SUM, 0, comm);
-        if (my_rank == 0) {
-            for (int i = 0; i < N; i++) {
-                if (local_stash_dict_change[i] > 0) {
-                    stash_dist[i] = local_stash_dict_change[i];
-                }
-            }
+        for (int i = 0; i < p_used; i++) {
+            _local_first = active_nodes_size * i / p_used;
+            _local_last = active_nodes_size * (i + 1) / p_used - 1;
+            _local_N_size = active_nodes[_local_last] - active_nodes[_local_first] + 1;
+            MPI_Bcast(&stash_dist[active_nodes[_local_first]], _local_N_size, MPI_INT, i, comm);
         }
-        MPI_Bcast(stash_dist, N, MPI_INT, 0, comm);
-        free(local_stash_dict_change);
-        free(local_stash_dist);
+        // MPI_Barrier(comm);
+        // auto end_clock = high_resolution_clock::now();
+        // if (my_rank == 0)
+        //     fprintf(stderr, "Elapsed Time: %.9lf s\n", duration_cast<nanoseconds>(end_clock - start_clock).count() / pow(10, 9));
 
         // Stage 3: update dist.
         swap(dist, stash_dist);
@@ -163,6 +227,8 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
                 active_nodes.emplace_back(u);
             }
         }
+        local_active_nodes.resize(0);
+        count++;
     }
 
     if (my_rank == 0) {
