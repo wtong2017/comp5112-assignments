@@ -44,6 +44,7 @@ void pre_flow(int *dist, int64_t *excess, int *cap, int *flow, int N, int src) {
 
 // Global variables
 vector<int> active_nodes;
+pthread_mutex_t mutex; 
 
 // Thread functions
 void *push(void *args) {
@@ -55,17 +56,12 @@ void *push(void *args) {
     int *loc_flow = my_args->flow;
     int *dist = my_args->dist;
     int64_t *excess = my_args->excess;
+    int64_t *stash_excess = my_args->stash_excess;
     int *stash_send = my_args->stash_send;
     int avg = (active_nodes.size() + num_threads - 1) / num_threads;
     int nodes_beg = avg * my_rank;
     int nodes_end = min<int>(avg * (my_rank + 1), active_nodes.size());
 
-    // printf("Hello from %ld\n", my_rank);
-    // for (auto u : active_nodes)
-    //     printf("%i\n", u);
-    // for (int i = 0; i < loc_n * loc_n; i++)
-    //     printf("%i, ", loc_cap[i]);
-    // printf("\n");
     for (auto nodes_it = nodes_beg; nodes_it < nodes_end; nodes_it++) {
         auto u = active_nodes[nodes_it];
         for (auto v = 0; v < loc_n; v++) {
@@ -74,6 +70,19 @@ void *push(void *args) {
             if (residual_cap > 0 && dist[u] > dist[v] && excess[u] > 0) {
                 stash_send[utils::idx(u, v, loc_n)] = min<int64_t>(excess[u], residual_cap);
                 excess[u] -= stash_send[utils::idx(u, v, loc_n)];
+            }
+        }
+    }
+    for (auto nodes_it = nodes_beg; nodes_it < nodes_end; nodes_it++) {
+        auto u = active_nodes[nodes_it];
+        for (auto v = 0; v < loc_n; v++) {
+            if (stash_send[utils::idx(u, v, loc_n)] > 0) {
+                loc_flow[utils::idx(u, v, loc_n)] += stash_send[utils::idx(u, v, loc_n)];
+                pthread_mutex_lock(&mutex);
+                loc_flow[utils::idx(v, u, loc_n)] -= stash_send[utils::idx(u, v, loc_n)];
+                stash_excess[v] += stash_send[utils::idx(u, v, loc_n)];
+                pthread_mutex_unlock(&mutex);
+                stash_send[utils::idx(u, v, loc_n)] = 0;
             }
         }
     }
@@ -121,6 +130,7 @@ int push_relabel(int num_threads, int N, int src, int sink, int *cap, int *flow)
     long thread;
     struct thread_arg *thread_args = (struct thread_arg *) malloc(num_threads * sizeof(struct thread_arg));
     pthread_t *thread_handles = (pthread_t *) malloc(num_threads * sizeof(pthread_t));
+    pthread_mutex_init(&mutex, NULL);
 
     int *dist = (int *) calloc(N, sizeof(int));
     int *stash_dist = (int *) calloc(N, sizeof(int));
@@ -166,16 +176,16 @@ int push_relabel(int num_threads, int N, int src, int sink, int *cap, int *flow)
         //         }
         //     }
         // }
-        for (auto u : active_nodes) {
-            for (auto v = 0; v < N; v++) {
-                if (stash_send[utils::idx(u, v, N)] > 0) {
-                    flow[utils::idx(u, v, N)] += stash_send[utils::idx(u, v, N)];
-                    flow[utils::idx(v, u, N)] -= stash_send[utils::idx(u, v, N)];
-                    stash_excess[v] += stash_send[utils::idx(u, v, N)];
-                    stash_send[utils::idx(u, v, N)] = 0;
-                }
-            }
-        }
+        // for (auto u : active_nodes) {
+        //     for (auto v = 0; v < N; v++) {
+        //         if (stash_send[utils::idx(u, v, N)] > 0) {
+        //             flow[utils::idx(u, v, N)] += stash_send[utils::idx(u, v, N)];
+        //             flow[utils::idx(v, u, N)] -= stash_send[utils::idx(u, v, N)];
+        //             stash_excess[v] += stash_send[utils::idx(u, v, N)];
+        //             stash_send[utils::idx(u, v, N)] = 0;
+        //         }
+        //     }
+        // }
 
         // Stage 2: relabel (update dist to stash_dist).
         memcpy(stash_dist, dist, N * sizeof(int));
@@ -217,6 +227,8 @@ int push_relabel(int num_threads, int N, int src, int sink, int *cap, int *flow)
             }
         }
     }
+
+    pthread_mutex_destroy(&mutex);
 
     free(dist);
     free(stash_dist);
