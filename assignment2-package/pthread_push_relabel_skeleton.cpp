@@ -26,6 +26,11 @@ struct thread_arg {
     int N;
     int *cap;
     int *flow;
+    int *dist;
+    int *stash_dist;
+    int64_t *excess;
+    int64_t *stash_excess;
+    int *stash_send;
 };
 
 void pre_flow(int *dist, int64_t *excess, int *cap, int *flow, int N, int src) {
@@ -39,11 +44,6 @@ void pre_flow(int *dist, int64_t *excess, int *cap, int *flow, int N, int src) {
 
 // Global variables
 vector<int> active_nodes;
-int *dist;
-int *stash_dist;
-int64_t *excess;
-int64_t *stash_excess;
-int *stash_send;
 
 // Thread functions
 void *push(void* args) {
@@ -53,6 +53,9 @@ void *push(void* args) {
     int loc_n = my_args->N;
     int *loc_cap = my_args->cap;
     int *loc_flow = my_args->flow;
+    int *dist = my_args->dist;
+    int64_t *excess = my_args->excess;
+    int *stash_send = my_args->stash_send;
     int avg = (active_nodes.size() + num_threads - 1) / num_threads;
     int nodes_beg = avg * my_rank;
     int nodes_end = min<int>(avg * (my_rank + 1), active_nodes.size());
@@ -89,15 +92,15 @@ int push_relabel(int num_threads, int N, int src, int sink, int *cap, int *flow)
     struct thread_arg *thread_args = (struct thread_arg *) malloc(num_threads * sizeof(struct thread_arg));
     pthread_t *thread_handles = (pthread_t *) malloc(num_threads * sizeof(pthread_t));
 
-    dist = (int *) calloc(N, sizeof(int));
-    stash_dist = (int *) calloc(N, sizeof(int));
-    excess = (int64_t *) calloc(N, sizeof(int64_t));
-    stash_excess = (int64_t *) calloc(N, sizeof(int64_t));
+    int *dist = (int *) calloc(N, sizeof(int));
+    int *stash_dist = (int *) calloc(N, sizeof(int));
+    auto *excess = (int64_t *) calloc(N, sizeof(int64_t));
+    auto *stash_excess = (int64_t *) calloc(N, sizeof(int64_t));
 
     // PreFlow.
     pre_flow(dist, excess, cap, flow, N, src);
 
-    stash_send = (int *) calloc(N * N, sizeof(int));
+    int *stash_send = (int *) calloc(N * N, sizeof(int));
     for (auto u = 0; u < N; u++) {
         if (u != src && u != sink) {
             active_nodes.emplace_back(u);
@@ -113,6 +116,11 @@ int push_relabel(int num_threads, int N, int src, int sink, int *cap, int *flow)
             thread_args[thread].N = N;
             thread_args[thread].cap = cap;
             thread_args[thread].flow = flow;
+            thread_args[thread].dist = dist;
+            thread_args[thread].stash_dist = stash_dist;
+            thread_args[thread].excess = excess;
+            thread_args[thread].stash_excess = stash_excess;
+            thread_args[thread].stash_send = stash_send;
             pthread_create(&thread_handles[thread], NULL, push, (void *) &thread_args[thread]);
         }
         for (thread = 0; thread < num_threads; thread++)
