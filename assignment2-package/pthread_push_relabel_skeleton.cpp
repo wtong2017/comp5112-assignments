@@ -46,7 +46,7 @@ void pre_flow(int *dist, int64_t *excess, int *cap, int *flow, int N, int src) {
 vector<int> active_nodes;
 
 // Thread functions
-void *push(void* args) {
+void *push(void *args) {
     struct thread_arg *my_args = (struct thread_arg *) args;
     long my_rank = my_args->rank;
     int num_threads = my_args->num_threads;
@@ -74,6 +74,36 @@ void *push(void* args) {
             if (residual_cap > 0 && dist[u] > dist[v] && excess[u] > 0) {
                 stash_send[utils::idx(u, v, loc_n)] = min<int64_t>(excess[u], residual_cap);
                 excess[u] -= stash_send[utils::idx(u, v, loc_n)];
+            }
+        }
+    }
+    return NULL;
+}
+void *relabel(void *args) {
+    struct thread_arg *my_args = (struct thread_arg *) args;
+    long my_rank = my_args->rank;
+    int num_threads = my_args->num_threads;
+    int loc_n = my_args->N;
+    int *loc_cap = my_args->cap;
+    int *loc_flow = my_args->flow;
+    int *dist = my_args->dist;
+    int *stash_dist = my_args->stash_dist;
+    int64_t *excess = my_args->excess;
+    int *stash_send = my_args->stash_send;
+    int avg = (active_nodes.size() + num_threads - 1) / num_threads;
+    int nodes_beg = avg * my_rank;
+    int nodes_end = min<int>(avg * (my_rank + 1), active_nodes.size());
+
+    for (auto nodes_it = nodes_beg; nodes_it < nodes_end; nodes_it++) {
+        auto u = active_nodes[nodes_it];
+        if (excess[u] > 0) {
+            int min_dist = INT32_MAX;
+            for (auto v = 0; v < loc_n; v++) {
+                auto residual_cap = loc_cap[utils::idx(u, v, loc_n)] - loc_flow[utils::idx(u, v, loc_n)];
+                if (residual_cap > 0) {
+                    min_dist = min(min_dist, dist[v]);
+                    stash_dist[u] = min_dist + 1;
+                }
             }
         }
     }
@@ -123,8 +153,9 @@ int push_relabel(int num_threads, int N, int src, int sink, int *cap, int *flow)
             thread_args[thread].stash_send = stash_send;
             pthread_create(&thread_handles[thread], NULL, push, (void *) &thread_args[thread]);
         }
-        for (thread = 0; thread < num_threads; thread++)
+        for (thread = 0; thread < num_threads; thread++) {
             pthread_join(thread_handles[thread], NULL);
+        }
         // for (auto u : active_nodes) {
         //     for (auto v = 0; v < N; v++) {
         //         auto residual_cap = cap[utils::idx(u, v, N)] -
@@ -148,17 +179,23 @@ int push_relabel(int num_threads, int N, int src, int sink, int *cap, int *flow)
 
         // Stage 2: relabel (update dist to stash_dist).
         memcpy(stash_dist, dist, N * sizeof(int));
-        for (auto u : active_nodes) {
-            if (excess[u] > 0) {
-                int min_dist = INT32_MAX;
-                for (auto v = 0; v < N; v++) {
-                    auto residual_cap = cap[utils::idx(u, v, N)] - flow[utils::idx(u, v, N)];
-                    if (residual_cap > 0) {
-                        min_dist = min(min_dist, dist[v]);
-                        stash_dist[u] = min_dist + 1;
-                    }
-                }
-            }
+        // for (auto u : active_nodes) {
+        //     if (excess[u] > 0) {
+        //         int min_dist = INT32_MAX;
+        //         for (auto v = 0; v < N; v++) {
+        //             auto residual_cap = cap[utils::idx(u, v, N)] - flow[utils::idx(u, v, N)];
+        //             if (residual_cap > 0) {
+        //                 min_dist = min(min_dist, dist[v]);
+        //                 stash_dist[u] = min_dist + 1;
+        //             }
+        //         }
+        //     }
+        // }
+        for (thread = 0; thread < num_threads; thread++) {
+            pthread_create(&thread_handles[thread], NULL, relabel, (void *) &thread_args[thread]);
+        }
+        for (thread = 0; thread < num_threads; thread++) {
+            pthread_join(thread_handles[thread], NULL);
         }
 
         // Stage 3: update dist.
