@@ -229,6 +229,7 @@ int push_relabel(int num_threads, int N, int src, int sink, int *cap, int *flow)
     }
 
     pthread_mutex_destroy(&mutex);
+    free(thread_handles);
 
     free(dist);
     free(stash_dist);
