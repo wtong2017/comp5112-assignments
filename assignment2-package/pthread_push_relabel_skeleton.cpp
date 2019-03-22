@@ -147,20 +147,24 @@ int push_relabel(int num_threads, int N, int src, int sink, int *cap, int *flow)
         }
     }
 
+    // Set up static thread args
+    for (thread = 0; thread < num_threads; thread++) {
+        thread_args[thread].rank = thread;
+        thread_args[thread].num_threads = num_threads;
+        thread_args[thread].N = N;
+        thread_args[thread].cap = cap;
+        thread_args[thread].flow = flow;
+        thread_args[thread].excess = excess;
+        thread_args[thread].stash_excess = stash_excess;
+        thread_args[thread].stash_send = stash_send;
+    }
+
     // Four-Stage Pulses.
     while (!active_nodes.empty()) {
         // Stage 1: push.
         for (thread = 0; thread < num_threads; thread++) {
-            thread_args[thread].rank = thread;
-            thread_args[thread].num_threads = num_threads;
-            thread_args[thread].N = N;
-            thread_args[thread].cap = cap;
-            thread_args[thread].flow = flow;
             thread_args[thread].dist = dist;
             thread_args[thread].stash_dist = stash_dist;
-            thread_args[thread].excess = excess;
-            thread_args[thread].stash_excess = stash_excess;
-            thread_args[thread].stash_send = stash_send;
             pthread_create(&thread_handles[thread], NULL, push, (void *) &thread_args[thread]);
         }
         for (thread = 0; thread < num_threads; thread++) {
@@ -230,6 +234,7 @@ int push_relabel(int num_threads, int N, int src, int sink, int *cap, int *flow)
 
     pthread_mutex_destroy(&mutex);
     free(thread_handles);
+    free(thread_args);
 
     free(dist);
     free(stash_dist);
