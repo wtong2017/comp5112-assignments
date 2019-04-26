@@ -27,7 +27,7 @@ void pre_flow(int *dist, int64_t *excess, int *cap, int *flow, int N, int src) {
     }
 }
 
-__global__ void push(int *active_nodes, int *cap, int *flow, int *dist, int64_t *excess, int64_t *stash_excess, int *stash_send, int active_nodes_size, int N) {
+__global__ void push(int *active_nodes, int *cap, int *flow, int *dist, int64_t *excess, int64_t *stash_excess, int active_nodes_size, int N) {
     extern __shared__ int s_residual_cap[];
 
     // Parallel on u
@@ -144,7 +144,7 @@ int push_relabel(int blocks_per_grid, int threads_per_block, int N, int src, int
     size_t sizeNNInt = N * N * sizeof(int);
     size_t sizeNInt = N * sizeof(int);
     size_t sizeNInt64 = N * sizeof(int64_t);
-    int *d_cap, *d_flow, *d_dist, *d_stash_send;
+    int *d_cap, *d_flow, *d_dist;
     int64_t *d_excess, *d_stash_excess;
 
     // PreFlow
@@ -153,7 +153,6 @@ int push_relabel(int blocks_per_grid, int threads_per_block, int N, int src, int
     cudaMalloc(&d_cap, sizeNNInt);
     cudaMalloc(&d_flow, sizeNNInt);
     cudaMalloc(&d_dist, sizeNInt);
-    cudaMalloc(&d_stash_send, sizeNNInt);
     cudaMalloc(&d_excess, sizeNInt64);
     cudaMalloc(&d_stash_excess, sizeNInt64);
 
@@ -165,15 +164,12 @@ int push_relabel(int blocks_per_grid, int threads_per_block, int N, int src, int
     cudaMemcpy(d_stash_excess, stash_excess, sizeNInt64, cudaMemcpyHostToDevice);
 
     vector<int> active_nodes;
-    int *stash_send = (int *) calloc(N * N, sizeof(int));
     int *d_active_nodes;
     for (auto u = 0; u < N; u++) {
         if (u != src && u != sink) {
             active_nodes.emplace_back(u);
         }
     }
-
-    cudaMemcpy(d_stash_send, stash_send, sizeNNInt, cudaMemcpyHostToDevice);
 
     int counter = 0;
     // Four-Stage Pulses.
@@ -186,7 +182,7 @@ int push_relabel(int blocks_per_grid, int threads_per_block, int N, int src, int
         cudaMemcpy(d_active_nodes, &active_nodes[0], sizeof(int) * active_nodes_size, cudaMemcpyHostToDevice);
 
         // Stage 1: push.
-        push<<<blocks_per_grid, threads_per_block, block_avg * N * sizeof(int)>>>(d_active_nodes, d_cap, d_flow, d_dist, d_excess, d_stash_excess, d_stash_send, active_nodes_size, N);
+        push<<<blocks_per_grid, threads_per_block, block_avg * N * sizeof(int)>>>(d_active_nodes, d_cap, d_flow, d_dist, d_excess, d_stash_excess, active_nodes_size, N);
         cudaMemcpy(flow, d_flow, sizeNNInt, cudaMemcpyDeviceToHost);
 
         // Stage 2: relabel
@@ -217,7 +213,6 @@ int push_relabel(int blocks_per_grid, int threads_per_block, int N, int src, int
     free(dist);
     free(excess);
     free(stash_excess);
-    free(stash_send);
 
     return 0;
 }
