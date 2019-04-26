@@ -42,12 +42,23 @@ int push_relabel(int N, int src, int sink, int *cap, int *flow) {
             for (auto v = 0; v < N; v++) {
                 auto residual_cap = cap[utils::idx(u, v, N)] -
                                     flow[utils::idx(u, v, N)];
+                // cout << residual_cap << ", ";
                 if (residual_cap > 0 && dist[u] > dist[v] && excess[u] > 0) {
                     stash_send[utils::idx(u, v, N)] = std::min<int64_t>(excess[u], residual_cap);
                     excess[u] -= stash_send[utils::idx(u, v, N)];
                 }
             }
+            // cout << endl;
         }
+        // cout << "----" << endl;
+        // for (int i = 0; i < N; i++) {
+        //     for (int j = 0; j < N; j++) {
+        //         cout << stash_send[utils::idx(i, j, N)] << ", ";
+        //     }
+        //     cout << endl;
+        // }
+        // cout << "----" << endl;
+
         for (auto u : active_nodes) {
             for (auto v = 0; v < N; v++) {
                 if (stash_send[utils::idx(u, v, N)] > 0) {
@@ -58,6 +69,14 @@ int push_relabel(int N, int src, int sink, int *cap, int *flow) {
                 }
             }
         }
+
+        for (int i = 0; i < N; i++) {
+            for (int j = 0; j < N; j++) {
+                cout << flow[utils::idx(i, j, N)] << ", ";
+            }
+            cout << endl;
+        }
+        cout << "-----" << endl;
 
         // Stage 2: relabel (update dist to stash_dist).
         memcpy(stash_dist, dist, N * sizeof(int));
