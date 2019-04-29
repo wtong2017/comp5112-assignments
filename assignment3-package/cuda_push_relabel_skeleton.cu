@@ -96,12 +96,14 @@ __global__ void relabel(int *active_nodes, int *cap, int *flow, int *dist, int64
     for (auto nodes_it = block_beg; nodes_it < block_end; nodes_it++) {
         auto u = active_nodes[nodes_it];
         if (excess[u] > 0) {
+            int d_min = INT32_MAX;
             for (auto v = thread_beg; v < thread_end; v++) {
                 auto residual_cap = cap[utils::dev_idx(u, v, N)] - flow[utils::dev_idx(u, v, N)];
                 if (residual_cap > 0) {
-                    atomicMin(&s_min[i], dist[v]);
+                    d_min = min(d_min, dist[v]);
                 }
             }
+            atomicMin(&s_min[i], d_min);
         }
         i++;
     }
