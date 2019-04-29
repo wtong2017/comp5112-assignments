@@ -185,7 +185,6 @@ int push_relabel(int blocks_per_grid, int threads_per_block, int N, int src, int
 
         // Stage 1: push.
         push<<<blocks_per_grid, threads_per_block, block_avg * N * sizeof(int)>>>(d_active_nodes, d_cap, d_flow, d_dist, d_excess, d_stash_excess, active_nodes_size, N);
-        cudaMemcpy(flow, d_flow, sizeNNInt, cudaMemcpyDeviceToHost);
 
         // Stage 2: relabel
         // TODO: it could be faster here
@@ -208,9 +207,13 @@ int push_relabel(int blocks_per_grid, int threads_per_block, int N, int src, int
     }
     // printf("Finish %d\n", counter);
 
+    cudaMemcpy(flow, d_flow, sizeNNInt, cudaMemcpyDeviceToHost);
+
     cudaFree(d_cap);
     cudaFree(d_flow);
     cudaFree(d_excess);
+    cudaFree(d_dist);
+    cudaFree(d_stash_excess);
 
     free(dist);
     free(excess);
