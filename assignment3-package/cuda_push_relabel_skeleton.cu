@@ -27,13 +27,13 @@ void pre_flow(int *dist, int64_t *excess, int *cap, int *flow, int N, int src) {
     }
 }
 
-__global__ void push(int *active_nodes, int *cap, int *flow, int *dist, int64_t *excess, int64_t *stash_excess, int active_nodes_size, int N) {
+__global__ void push(int *active_nodes, int *cap, int *flow, int *dist, int64_t *excess, int64_t *stash_excess, int *active_nodes_size, int N) {
     extern __shared__ int s_residual_cap[];
 
     // Parallel on u
-    int block_avg = (active_nodes_size + gridDim.x - 1) / gridDim.x;
+    int block_avg = (*active_nodes_size + gridDim.x - 1) / gridDim.x;
     int block_beg = block_avg * blockIdx.x;
-    int block_end = min(block_avg * (blockIdx.x + 1), active_nodes_size);
+    int block_end = min(block_avg * (blockIdx.x + 1), *active_nodes_size);
 
     // Parallel on v
     int thread_avg = (N + blockDim.x - 1) / blockDim.x;
@@ -70,13 +70,13 @@ __global__ void push(int *active_nodes, int *cap, int *flow, int *dist, int64_t 
     }
 }
 
-__global__ void relabel(int *active_nodes, int *cap, int *flow, int *dist, int64_t *excess, int active_nodes_size, int N) {
+__global__ void relabel(int *active_nodes, int *cap, int *flow, int *dist, int64_t *excess, int *active_nodes_size, int N) {
     extern __shared__ int s_min[];
 
     // Parallel on u
-    int block_avg = (active_nodes_size + gridDim.x - 1) / gridDim.x;
+    int block_avg = (*active_nodes_size + gridDim.x - 1) / gridDim.x;
     int block_beg = block_avg * blockIdx.x;
-    int block_end = min(block_avg * (blockIdx.x + 1), active_nodes_size);
+    int block_end = min(block_avg * (blockIdx.x + 1), *active_nodes_size);
 
     // Parallel on v
     int thread_avg = (N + blockDim.x - 1) / blockDim.x;
@@ -120,7 +120,7 @@ __global__ void relabel(int *active_nodes, int *cap, int *flow, int *dist, int64
     }
 }
 
-__global__ void update(int64_t* excess, int64_t* stash_excess, int N) {
+__global__ void update(int *active_nodes, int64_t* excess, int64_t* stash_excess, int *active_nodes_size, int N, int src, int sink) {
     int i = blockDim.x * blockIdx.x + threadIdx.x;
     int num_threads = blockDim.x * gridDim.x;
 
@@ -132,6 +132,17 @@ __global__ void update(int64_t* excess, int64_t* stash_excess, int N) {
     for (auto v = thread_beg; v < thread_end; v++) {
         excess[v] += stash_excess[v];
         stash_excess[v] = 0;
+    }
+
+    // Construct active nodes.
+    if (i == 0) {
+        *active_nodes_size = 0;
+        for (auto u = 0; u < N; u++) {
+            if (excess[u] > 0 && u != src && u != sink) {
+                active_nodes[*active_nodes_size] = u;
+                *active_nodes_size += 1;
+            }
+        }
     }
 }
 
@@ -165,47 +176,43 @@ int push_relabel(int blocks_per_grid, int threads_per_block, int N, int src, int
     cudaMemcpy(d_excess, excess, sizeNInt64, cudaMemcpyHostToDevice);
     cudaMemcpy(d_stash_excess, stash_excess, sizeNInt64, cudaMemcpyHostToDevice);
 
-    vector<int> active_nodes;
     int *d_active_nodes;
+    bool *active_nodes = (bool *) calloc(N, sizeof(bool));
+    int active_nodes_size = 0;
+    int *d_active_nodes_size;
     for (auto u = 0; u < N; u++) {
         if (u != src && u != sink) {
-            active_nodes.emplace_back(u);
+            active_nodes[active_nodes_size] = u;
+            active_nodes_size++;
         }
     }
+
+    cudaMalloc(&d_active_nodes, sizeof(int) * (N - 2));
+    cudaMalloc(&d_active_nodes_size, sizeof(int));
+    cudaMemcpy(d_active_nodes, active_nodes, sizeof(int) * N, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_active_nodes_size, &active_nodes_size, sizeof(int), cudaMemcpyHostToDevice);
 
     int counter = 0;
     // Four-Stage Pulses.
-    while (!active_nodes.empty()) {
+    while (active_nodes_size > 0) {
         // if (counter > 3)
         //     break;
-        int active_nodes_size = active_nodes.size();
         int block_avg = (active_nodes_size + blocks_per_grid - 1) / blocks_per_grid;
-        cudaMalloc(&d_active_nodes, sizeof(int) * active_nodes_size);
-        cudaMemcpy(d_active_nodes, &active_nodes[0], sizeof(int) * active_nodes_size, cudaMemcpyHostToDevice);
 
         // Stage 1: push.
-        push<<<blocks_per_grid, threads_per_block, block_avg * N * sizeof(int)>>>(d_active_nodes, d_cap, d_flow, d_dist, d_excess, d_stash_excess, active_nodes_size, N);
+        push<<<blocks_per_grid, threads_per_block, block_avg * N * sizeof(int)>>>(d_active_nodes, d_cap, d_flow, d_dist, d_excess, d_stash_excess, d_active_nodes_size, N);
 
         // Stage 2: relabel
-        // TODO: it could be faster here
-        relabel<<<blocks_per_grid, threads_per_block, block_avg * sizeof(int)>>>(d_active_nodes, d_cap, d_flow, d_dist, d_excess, active_nodes_size, N);
+        relabel<<<blocks_per_grid, threads_per_block, block_avg * sizeof(int)>>>(d_active_nodes, d_cap, d_flow, d_dist, d_excess, d_active_nodes_size, N);
 
         // Stage 3: apply excess-flow changes for destination vertices.
-        update<<<blocks_per_grid, threads_per_block>>>(d_excess, d_stash_excess, N);
-        cudaMemcpy(excess, d_excess, sizeNInt64, cudaMemcpyDeviceToHost);
+        update<<<blocks_per_grid, threads_per_block>>>(d_active_nodes, d_excess, d_stash_excess, d_active_nodes_size, N, src, sink);
 
-        // Construct active nodes.
-        cudaFree(d_active_nodes);
-        active_nodes.clear();
-        for (auto u = 0; u < N; u++) {
-            if (excess[u] > 0 && u != src && u != sink) {
-                active_nodes.emplace_back(u);
-            }
-        }
         // printf("Finish %d\n", counter);
         counter++;
+        cudaMemcpy(&active_nodes_size, d_active_nodes_size, sizeof(int), cudaMemcpyDeviceToHost);
     }
-    // printf("Finish %d\n", counter);
+    printf("Finish %d\n", counter);
 
     cudaMemcpy(flow, d_flow, sizeNNInt, cudaMemcpyDeviceToHost);
 
