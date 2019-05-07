@@ -27,7 +27,7 @@ void pre_flow(int *dist, int64_t *excess, int *cap, int *flow, int N, int src) {
     }
 }
 
-__global__ void push(int *active_nodes, int *cap, int *flow, int *dist, int64_t *excess, int64_t *stash_excess, int active_nodes_size, int N, int iter) {
+__global__ void push(int *active_nodes, int *cap, int *flow, int *dist, int64_t *excess, int64_t *stash_excess, int *stash_send, int active_nodes_size, int N, int iter) {
     extern __shared__ int s_residual_cap[];
     __shared__ int s_offset;
 
@@ -61,18 +61,25 @@ __global__ void push(int *active_nodes, int *cap, int *flow, int *dist, int64_t 
     __syncthreads();
 
     if (threadIdx.x == 0) {
-        //#pragma unroll 8
+        #pragma unroll 8
         for (auto i = 0; i < s_offset; i+=2) {
             auto residual_cap = s_residual_cap[i];
             auto v = s_residual_cap[i+1];
             if (excess[u] > 0) {
                 auto send = (excess[u] - residual_cap > 0 ? residual_cap : excess[u]);
-                atomicAdd(&flow[utils::dev_idx(u, v, N)], send);
-                atomicSub(&flow[utils::dev_idx(v, u, N)], send);
+                stash_send[utils::dev_idx(u, v, N)] = send;
                 excess[u] -= send;
-                atomicAdd((unsigned long long int*)&stash_excess[v], send);
             }
         }
+    }
+    __syncthreads();
+
+    for (auto v = thread_beg; v < thread_end; v++) {
+        auto send = stash_send[utils::dev_idx(u, v, N)];
+        atomicAdd(&flow[utils::dev_idx(u, v, N)], send);
+        atomicSub(&flow[utils::dev_idx(v, u, N)], send);
+        atomicAdd((unsigned long long int*)&stash_excess[v], send);
+        stash_send[utils::dev_idx(u, v, N)] = 0;
     }
 }
 
@@ -153,11 +160,12 @@ int push_relabel(int blocks_per_grid, int threads_per_block, int N, int src, int
     int *dist = (int *) calloc(N, sizeof(int));
     auto *excess = (int64_t *) calloc(N, sizeof(int64_t));
     auto *stash_excess = (int64_t *) calloc(N, sizeof(int64_t));
+    int *stash_send = (int *) calloc(N * N, sizeof(int));
 
     size_t sizeNNInt = N * N * sizeof(int);
     size_t sizeNInt = N * sizeof(int);
     size_t sizeNInt64 = N * sizeof(int64_t);
-    int *d_cap, *d_flow, *d_dist;
+    int *d_cap, *d_flow, *d_dist, *d_stash_send;
     int64_t *d_excess, *d_stash_excess;
 
     // PreFlow
@@ -165,12 +173,14 @@ int push_relabel(int blocks_per_grid, int threads_per_block, int N, int src, int
 
     cudaMalloc(&d_cap, sizeNNInt);
     cudaMalloc(&d_flow, sizeNNInt);
+    cudaMalloc(&d_stash_send, sizeNNInt);
     cudaMalloc(&d_dist, sizeNInt);
     cudaMalloc(&d_excess, sizeNInt64);
     cudaMalloc(&d_stash_excess, sizeNInt64);
 
     cudaMemcpy(d_cap, cap, sizeNNInt, cudaMemcpyHostToDevice);
     cudaMemcpy(d_flow, flow, sizeNNInt, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_stash_send, stash_send, sizeNNInt, cudaMemcpyHostToDevice);
 
     cudaMemcpy(d_dist, dist, sizeNInt, cudaMemcpyHostToDevice);
     cudaMemcpy(d_excess, excess, sizeNInt64, cudaMemcpyHostToDevice);
@@ -198,7 +208,7 @@ int push_relabel(int blocks_per_grid, int threads_per_block, int N, int src, int
         // Parallel on u
         for (int i = 0; i < block_avg; i++) {
             // TODO: it could be faster here
-            push<<<blocks_per_grid, threads_per_block, 2 * N * sizeof(int)>>>(d_active_nodes, d_cap, d_flow, d_dist, d_excess, d_stash_excess, active_nodes_size, N, i);
+            push<<<blocks_per_grid, threads_per_block, 2 * N * sizeof(int)>>>(d_active_nodes, d_cap, d_flow, d_dist, d_excess, d_stash_excess, d_stash_send, active_nodes_size, N, i);
         }
 
         // Stage 2: relabel
