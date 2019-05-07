@@ -27,49 +27,40 @@ void pre_flow(int *dist, int64_t *excess, int *cap, int *flow, int N, int src) {
     }
 }
 
-__global__ void push(int *active_nodes, int *cap, int *flow, int *dist, int64_t *excess, int64_t *stash_excess, int active_nodes_size, int N) {
+__global__ void push(int *active_nodes, int *cap, int *flow, int *dist, int64_t *excess, int64_t *stash_excess, int active_nodes_size, int N, int iter) {
     extern __shared__ int s_residual_cap[];
 
-    // Parallel on u
-    int block_avg = (active_nodes_size + gridDim.x - 1) / gridDim.x;
-    int block_beg = block_avg * blockIdx.x;
-    int block_end = min(block_avg * (blockIdx.x + 1), active_nodes_size);
+    int active_nodes_index = blockIdx.x + gridDim.x * iter;
+    if (active_nodes_index >= active_nodes_size) {
+        return;
+    }
+    int u = active_nodes[active_nodes_index];
 
     // Parallel on v
     int thread_avg = (N + blockDim.x - 1) / blockDim.x;
     int thread_beg = thread_avg * threadIdx.x;
     int thread_end = min(thread_avg * (threadIdx.x + 1), N);
 
-    int i = 0;
     #pragma unroll 8
-    for (auto nodes_it = block_beg; nodes_it < block_end; nodes_it++) {
-        auto u = active_nodes[nodes_it];
-        #pragma unroll 8
-        for (auto v = thread_beg; v < thread_end; v++) {
-            s_residual_cap[utils::dev_idx(i, v, N)] = cap[utils::dev_idx(u, v, N)] -
-                                flow[utils::dev_idx(u, v, N)];
-        }
-        i++;
+    for (auto v = thread_beg; v < thread_end; v++) {
+        s_residual_cap[v] = cap[utils::dev_idx(u, v, N)] -
+                            flow[utils::dev_idx(u, v, N)];
     }
     __syncthreads();
 
     if (threadIdx.x == 0) {
-        i = 0;
         #pragma unroll 8
-        for (auto nodes_it = block_beg; nodes_it < block_end; nodes_it++) {
-            auto u = active_nodes[nodes_it];
-            #pragma unroll 8
-            for (auto v = 0; v < N; v++) {
-                auto residual_cap = s_residual_cap[utils::dev_idx(i, v, N)];
-                if (residual_cap > 0 && dist[u] > dist[v] && excess[u] > 0) {
-                    auto send = (excess[u] - residual_cap > 0 ? residual_cap : excess[u]);
-                    atomicAdd(&flow[utils::dev_idx(u, v, N)], send);
-                    atomicSub(&flow[utils::dev_idx(v, u, N)], send);
-                    excess[u] -= send;
-                    atomicAdd((unsigned long long int*)&stash_excess[v], send);
-                }
+        // for (auto v = 0; v < x; v++) {
+        for (auto v = 0; v < N; v++) {
+            auto residual_cap = s_residual_cap[v];
+            if (residual_cap > 0 && dist[u] > dist[v] && excess[u] > 0) {
+            // if (excess[u] > 0) {
+                auto send = (excess[u] - residual_cap > 0 ? residual_cap : excess[u]);
+                atomicAdd(&flow[utils::dev_idx(u, v, N)], send);
+                atomicSub(&flow[utils::dev_idx(v, u, N)], send);
+                excess[u] -= send;
+                atomicAdd((unsigned long long int*)&stash_excess[v], send);
             }
-            i++;
         }
     }
 }
@@ -185,7 +176,7 @@ int push_relabel(int blocks_per_grid, int threads_per_block, int N, int src, int
     int counter = 0;
     // Four-Stage Pulses.
     while (!active_nodes.empty()) {
-        // if (counter > 3)
+        // if (counter > 1)
         //     break;
         int active_nodes_size = active_nodes.size();
         int block_avg = (active_nodes_size + blocks_per_grid - 1) / blocks_per_grid;
@@ -193,10 +184,13 @@ int push_relabel(int blocks_per_grid, int threads_per_block, int N, int src, int
         cudaMemcpy(d_active_nodes, &active_nodes[0], sizeof(int) * active_nodes_size, cudaMemcpyHostToDevice);
 
         // Stage 1: push.
-        push<<<blocks_per_grid, threads_per_block, block_avg * N * sizeof(int)>>>(d_active_nodes, d_cap, d_flow, d_dist, d_excess, d_stash_excess, active_nodes_size, N);
+        // Parallel on u
+        for (int i = 0; i < block_avg; i++) {
+            // TODO: it could be faster here
+            push<<<blocks_per_grid, threads_per_block, N * sizeof(int)>>>(d_active_nodes, d_cap, d_flow, d_dist, d_excess, d_stash_excess, active_nodes_size, N, i);
+        }
 
         // Stage 2: relabel
-        // TODO: it could be faster here
         relabel<<<blocks_per_grid, threads_per_block, block_avg * sizeof(int)>>>(d_active_nodes, d_cap, d_flow, d_dist, d_excess, active_nodes_size, N);
 
         // Stage 3: apply excess-flow changes for destination vertices.
