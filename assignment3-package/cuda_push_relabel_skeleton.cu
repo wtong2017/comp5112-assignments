@@ -29,6 +29,7 @@ void pre_flow(int *dist, int64_t *excess, int *cap, int *flow, int N, int src) {
 
 __global__ void push(int *active_nodes, int *cap, int *flow, int *dist, int64_t *excess, int64_t *stash_excess, int active_nodes_size, int N, int iter) {
     extern __shared__ int s_residual_cap[];
+    __shared__ int s_offset;
 
     int active_nodes_index = blockIdx.x + gridDim.x * iter;
     if (active_nodes_index >= active_nodes_size) {
@@ -41,20 +42,30 @@ __global__ void push(int *active_nodes, int *cap, int *flow, int *dist, int64_t 
     int thread_beg = thread_avg * threadIdx.x;
     int thread_end = min(thread_avg * (threadIdx.x + 1), N);
 
+    // Init shared memory
+    if (threadIdx.x == 0) {
+        s_offset = 0;
+    }
+    __syncthreads();
+
     #pragma unroll 8
     for (auto v = thread_beg; v < thread_end; v++) {
-        s_residual_cap[v] = cap[utils::dev_idx(u, v, N)] -
+        auto residual_cap = cap[utils::dev_idx(u, v, N)] -
                             flow[utils::dev_idx(u, v, N)];
+        if (residual_cap > 0 && dist[u] > dist[v]) {
+            int old_offset = atomicAdd(&s_offset, 2);
+            s_residual_cap[old_offset] = residual_cap;
+            s_residual_cap[old_offset+1] = v;
+        }
     }
     __syncthreads();
 
     if (threadIdx.x == 0) {
         #pragma unroll 8
-        // for (auto v = 0; v < x; v++) {
-        for (auto v = 0; v < N; v++) {
-            auto residual_cap = s_residual_cap[v];
-            if (residual_cap > 0 && dist[u] > dist[v] && excess[u] > 0) {
-            // if (excess[u] > 0) {
+        for (auto i = 0; i < s_offset; i+=2) {
+            auto residual_cap = s_residual_cap[i];
+            auto v = s_residual_cap[i+1];
+            if (excess[u] > 0) {
                 auto send = (excess[u] - residual_cap > 0 ? residual_cap : excess[u]);
                 atomicAdd(&flow[utils::dev_idx(u, v, N)], send);
                 atomicSub(&flow[utils::dev_idx(v, u, N)], send);
@@ -187,7 +198,7 @@ int push_relabel(int blocks_per_grid, int threads_per_block, int N, int src, int
         // Parallel on u
         for (int i = 0; i < block_avg; i++) {
             // TODO: it could be faster here
-            push<<<blocks_per_grid, threads_per_block, N * sizeof(int)>>>(d_active_nodes, d_cap, d_flow, d_dist, d_excess, d_stash_excess, active_nodes_size, N, i);
+            push<<<blocks_per_grid, threads_per_block, 2 * N * sizeof(int)>>>(d_active_nodes, d_cap, d_flow, d_dist, d_excess, d_stash_excess, active_nodes_size, N, i);
         }
 
         // Stage 2: relabel
@@ -208,7 +219,7 @@ int push_relabel(int blocks_per_grid, int threads_per_block, int N, int src, int
         // printf("Finish %d\n", counter);
         counter++;
     }
-    // printf("Finish %d\n", counter);
+    printf("Finish %d\n", counter);
 
     cudaMemcpy(flow, d_flow, sizeNNInt, cudaMemcpyDeviceToHost);
 
