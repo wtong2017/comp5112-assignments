@@ -48,7 +48,7 @@ __global__ void push(int *active_nodes, int *cap, int *flow, int *dist, int64_t 
     }
     __syncthreads();
 
-    #pragma unroll 8
+    //#pragma unroll 8
     for (auto v = thread_beg; v < thread_end; v++) {
         auto residual_cap = cap[utils::dev_idx(u, v, N)] -
                             flow[utils::dev_idx(u, v, N)];
@@ -61,7 +61,7 @@ __global__ void push(int *active_nodes, int *cap, int *flow, int *dist, int64_t 
     __syncthreads();
 
     if (threadIdx.x == 0) {
-        #pragma unroll 8
+        //#pragma unroll 8
         for (auto i = 0; i < s_offset; i+=2) {
             auto residual_cap = s_residual_cap[i];
             auto v = s_residual_cap[i+1];
@@ -91,7 +91,7 @@ __global__ void relabel(int *active_nodes, int *cap, int *flow, int *dist, int64
 
     int i = 0;
     if (threadIdx.x == 0) {
-        #pragma unroll 8
+        //#pragma unroll 8
         for (auto nodes_it = block_beg; nodes_it < block_end; nodes_it++) {
             s_min[i] = INT32_MAX;
             i++;
@@ -100,12 +100,12 @@ __global__ void relabel(int *active_nodes, int *cap, int *flow, int *dist, int64
     __syncthreads();
 
     i = 0;
-    #pragma unroll 8
+    //#pragma unroll 8
     for (auto nodes_it = block_beg; nodes_it < block_end; nodes_it++) {
         auto u = active_nodes[nodes_it];
         if (excess[u] > 0) {
             int d_min = INT32_MAX;
-            #pragma unroll 8
+            //#pragma unroll 8
             for (auto v = thread_beg; v < thread_end; v++) {
                 auto residual_cap = cap[utils::dev_idx(u, v, N)] - flow[utils::dev_idx(u, v, N)];
                 if (residual_cap > 0) {
@@ -120,7 +120,7 @@ __global__ void relabel(int *active_nodes, int *cap, int *flow, int *dist, int64
 
     if (threadIdx.x == 0) {
         i = 0;
-        #pragma unroll 8
+        //#pragma unroll 8
         for (auto nodes_it = block_beg; nodes_it < block_end; nodes_it++) {
             auto u = active_nodes[nodes_it];
             if (s_min[i] != INT32_MAX)
@@ -139,7 +139,7 @@ __global__ void update(int64_t* excess, int64_t* stash_excess, int N) {
     int thread_beg = thread_avg * i;
     int thread_end = min(thread_avg * (i + 1), N);
 
-    #pragma unroll 8
+    //#pragma unroll 8
     for (auto v = thread_beg; v < thread_end; v++) {
         excess[v] += stash_excess[v];
         stash_excess[v] = 0;
@@ -219,7 +219,7 @@ int push_relabel(int blocks_per_grid, int threads_per_block, int N, int src, int
         // printf("Finish %d\n", counter);
         counter++;
     }
-    printf("Finish %d\n", counter);
+    // printf("Finish %d\n", counter);
 
     cudaMemcpy(flow, d_flow, sizeNNInt, cudaMemcpyDeviceToHost);
 
