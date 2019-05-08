@@ -137,9 +137,13 @@ __global__ void relabel(int *active_nodes, int *cap, int *flow, int *dist, int64
     }
 }
 
-__global__ void update(int64_t* excess, int64_t* stash_excess, int N) {
+__global__ void update(int *active_nodes, int *offset, int64_t* excess, int64_t* stash_excess, int N, int src, int sink) {
     int i = blockDim.x * blockIdx.x + threadIdx.x;
     int num_threads = blockDim.x * gridDim.x;
+
+    if (i == 0) {
+        *offset = 0;
+    }
 
     // Parallel on v
     int thread_avg = (N + num_threads - 1) / num_threads;
@@ -150,6 +154,11 @@ __global__ void update(int64_t* excess, int64_t* stash_excess, int N) {
     for (auto v = thread_beg; v < thread_end; v++) {
         excess[v] += stash_excess[v];
         stash_excess[v] = 0;
+        if (excess[v] > 0 && v != src && v != sink) {
+            // Construct active nodes.
+            int old_offset = atomicAdd(offset, 1);
+            active_nodes[old_offset] = v;
+        }
     }
 }
 
@@ -165,7 +174,7 @@ int push_relabel(int blocks_per_grid, int threads_per_block, int N, int src, int
     size_t sizeNNInt = N * N * sizeof(int);
     size_t sizeNInt = N * sizeof(int);
     size_t sizeNInt64 = N * sizeof(int64_t);
-    int *d_cap, *d_flow, *d_dist, *d_stash_send;
+    int *d_cap, *d_flow, *d_dist, *d_stash_send, *d_active_nodes_size;
     int64_t *d_excess, *d_stash_excess;
 
     // PreFlow
@@ -193,21 +202,22 @@ int push_relabel(int blocks_per_grid, int threads_per_block, int N, int src, int
             active_nodes.emplace_back(u);
         }
     }
-
+    int active_nodes_size = active_nodes.size();
+    cudaMalloc(&d_active_nodes, sizeof(int) * active_nodes_size);
+    cudaMalloc(&d_active_nodes_size, sizeof(int));
+    cudaMemcpy(d_active_nodes, &active_nodes[0], sizeof(int) * active_nodes_size, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_active_nodes_size, &active_nodes_size, sizeof(int), cudaMemcpyHostToDevice);
+    
     int counter = 0;
     // Four-Stage Pulses.
-    while (!active_nodes.empty()) {
+    while (active_nodes_size > 0) {
         // if (counter > 1)
         //     break;
-        int active_nodes_size = active_nodes.size();
         int block_avg = (active_nodes_size + blocks_per_grid - 1) / blocks_per_grid;
-        cudaMalloc(&d_active_nodes, sizeof(int) * active_nodes_size);
-        cudaMemcpy(d_active_nodes, &active_nodes[0], sizeof(int) * active_nodes_size, cudaMemcpyHostToDevice);
 
         // Stage 1: push.
         // Parallel on u
         for (int i = 0; i < block_avg; i++) {
-            // TODO: it could be faster here
             push<<<blocks_per_grid, threads_per_block, 2 * N * sizeof(int)>>>(d_active_nodes, d_cap, d_flow, d_dist, d_excess, d_stash_excess, d_stash_send, active_nodes_size, N, i);
         }
 
@@ -215,17 +225,9 @@ int push_relabel(int blocks_per_grid, int threads_per_block, int N, int src, int
         relabel<<<blocks_per_grid, threads_per_block, block_avg * sizeof(int)>>>(d_active_nodes, d_cap, d_flow, d_dist, d_excess, active_nodes_size, N);
 
         // Stage 3: apply excess-flow changes for destination vertices.
-        update<<<blocks_per_grid, threads_per_block>>>(d_excess, d_stash_excess, N);
-        cudaMemcpy(excess, d_excess, sizeNInt64, cudaMemcpyDeviceToHost);
+        update<<<blocks_per_grid, threads_per_block>>>(d_active_nodes, d_active_nodes_size, d_excess, d_stash_excess, N, src, sink);
 
-        // Construct active nodes.
-        cudaFree(d_active_nodes);
-        active_nodes.clear();
-        for (auto u = 0; u < N; u++) {
-            if (excess[u] > 0 && u != src && u != sink) {
-                active_nodes.emplace_back(u);
-            }
-        }
+        cudaMemcpy(&active_nodes_size, d_active_nodes_size, sizeof(int), cudaMemcpyDeviceToHost);
         // printf("Finish %d\n", counter);
         counter++;
     }
@@ -238,6 +240,9 @@ int push_relabel(int blocks_per_grid, int threads_per_block, int N, int src, int
     cudaFree(d_excess);
     cudaFree(d_dist);
     cudaFree(d_stash_excess);
+    cudaFree(d_stash_send);
+    cudaFree(d_active_nodes);
+    cudaFree(d_active_nodes_size);
 
     free(dist);
     free(excess);
